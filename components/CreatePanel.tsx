@@ -164,24 +164,28 @@ export const CreatePanel: React.FC<CreatePanelProps> = ({
     const stored = localStorage.getItem('ace-bulkCount');
     return stored ? Number(stored) : 1;
   });
-  const [guidanceScale, setGuidanceScale] = useState(9.0);
+  // 7.5 suits the deployed acestep-v15-xl-sft; 9 over-guides it
+  const [guidanceScale, setGuidanceScale] = useState(7.5);
   const [randomSeed, setRandomSeed] = useState(true);
   const [seed, setSeed] = useState(-1);
   const [thinking, setThinking] = useState(false); // Default false for GPU compatibility
   const [enhance, setEnhance] = useState(false); // AI Enhance: uses LLM to enrich caption & generate metadata
   const [audioFormat, setAudioFormat] = useState<'mp3' | 'flac'>('mp3');
-  const [inferenceSteps, setInferenceSteps] = useState(12);
+  // xl-sft needs 32-64 steps; 12 produces smeared/"syrupy" audio.
+  // (Drop to 8-12 only if the backend is switched to a turbo model.)
+  const [inferenceSteps, setInferenceSteps] = useState(60);
   const [inferMethod, setInferMethod] = useState<'ode' | 'sde'>('ode');
   const [lmBackend, setLmBackend] = useState<'pt' | 'vllm'>('pt');
   const [lmModel, setLmModel] = useState(() => {
-    return localStorage.getItem('ace-lmModel') || 'acestep-5Hz-lm-0.6B';
+    // 1.7B is what the backend actually runs; 0.6B would trigger a model switch
+    return localStorage.getItem('ace-lmModel') || 'acestep-5Hz-lm-1.7B';
   });
   const [shift, setShift] = useState(3.0);
 
   // LM Parameters (under Expert)
   const [showLmParams, setShowLmParams] = useState(false);
-  const [lmTemperature, setLmTemperature] = useState(0.8);
-  const [lmCfgScale, setLmCfgScale] = useState(2.2);
+  const [lmTemperature, setLmTemperature] = useState(0.85);
+  const [lmCfgScale, setLmCfgScale] = useState(2.0);
   const [lmTopK, setLmTopK] = useState(0);
   const [lmTopP, setLmTopP] = useState(0.92);
   const [lmNegativePrompt, setLmNegativePrompt] = useState('NO USER INPUT');

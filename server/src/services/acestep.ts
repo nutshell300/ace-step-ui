@@ -134,7 +134,11 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
   const caption = params.style || 'pop music';
   const prompt = params.customMode ? caption : (params.songDescription || caption);
   const lyrics = params.instrumental ? '' : (params.lyrics || '');
-  const isThinking = params.thinking ?? false;
+  // Simple mode with vocals has no explicit lyrics — the LM must compose them,
+  // so thinking is mandatory there (otherwise the DiT gets zero semantic content).
+  const isThinking =
+    (params.thinking ?? false) ||
+    (!params.customMode && !params.instrumental && !params.lyrics);
   const isEnhance = params.enhance ?? false;
 
   // Prepare audio files (async — reads from disk)
@@ -150,60 +154,90 @@ async function buildGradioArgs(params: GenerationParams): Promise<unknown[]> {
   // CoT features are gated by enhance OR thinking (either enables LLM enrichment)
   const useCot = isEnhance || isThinking;
 
+  // Positional layout for the CURRENT /generation_wrapper (72 inputs).
+  // Verified against the live /gradio_api/info schema on 2026-07-14.
+  // Upstream removed Task Type / Is Format Caption from the wrapper and added:
+  // LM Codes Strength, no_fsq, Sampler Mode, velocity controls, DCW block,
+  // MP3 bitrate/sample-rate, fades, repaint mode/strength, variance,
+  // retake seed, and the flow-edit block.
   return [
     prompt,                                                       //  0: Music Caption
     lyrics,                                                       //  1: Lyrics
-    params.bpm && params.bpm > 0 ? params.bpm : 0,               //  2: BPM (0 = auto)
-    params.keyScale || '',                                        //  3: KeyScale
+    params.bpm && params.bpm > 0 ? params.bpm : null,             //  2: BPM (null = auto)
+    params.keyScale || '',                                        //  3: Key
     params.timeSignature || '',                                   //  4: Time Signature
     params.vocalLanguage || 'en',                                 //  5: Vocal Language
-    params.inferenceSteps ?? 8,                                   //  6: DiT Inference Steps
-    params.guidanceScale ?? 7.0,                                  //  7: DiT Guidance Scale
+    params.inferenceSteps ?? 60,                                  //  6: DiT Inference Steps (xl-sft: 32-64)
+    params.guidanceScale ?? 7.5,                                  //  7: DiT Guidance Scale
     params.randomSeed !== false,                                  //  8: Random Seed
     String(params.seed ?? -1),                                    //  9: Seed
     referenceAudio,                                               // 10: Reference Audio (filepath | null)
     params.duration && params.duration > 0 ? params.duration : -1, // 11: Audio Duration (-1 = auto)
-    Math.min(Math.max(params.batchSize ?? 1, 1), 16),            // 12: Batch Size (clamped 1-16)
+    Math.min(Math.max(params.batchSize ?? 1, 1), 8),              // 12: Batch Size (backend max 8)
     sourceAudio,                                                  // 13: Source Audio (filepath | null)
     params.audioCodes || '',                                      // 14: LM Codes Hints
     params.repaintingStart ?? 0.0,                                // 15: Repainting Start
     params.repaintingEnd ?? -1,                                   // 16: Repainting End
-    params.instruction || 'Fill the audio semantic mask with the style described in the text prompt.', // 17: Instruction
-    params.audioCoverStrength ?? 1.0,                             // 18: Audio Cover Strength
-    0.0,                                                          // 19: Cover Noise Strength (ACE-Step v1.5 new param, default 0.0)
-    (params.taskType === 'audio2audio' ? 'cover' : params.taskType) || 'text2music', // 20: Task Type
+    params.instruction || 'Fill the audio semantic mask based on the given conditions:', // 17: Instruction
+    // NOTE: the API *labels* for 18/19 are swapped vs the wired components
+    // (verified in generation_run_wiring.py): position 18 is the
+    // audio_cover_strength component, 19 is cover_noise_strength.
+    // Sending >0 noise strength on a no-source generation produces pure static.
+    1.0,                                                          // 18: audio_cover_strength ("LM Codes Strength") — backend default
+    needsSource ? (params.audioCoverStrength ?? 0.5) : 0.0,       // 19: cover_noise_strength — MUST be 0 without source audio
+    false,                                                        // 20: no_fsq
     params.useAdg ?? false,                                       // 21: Use ADG
     params.cfgIntervalStart ?? 0.0,                               // 22: CFG Interval Start
     params.cfgIntervalEnd ?? 1.0,                                 // 23: CFG Interval End
     params.shift ?? 3.0,                                          // 24: Shift
     params.inferMethod || 'ode',                                  // 25: Inference Method
-    params.customTimesteps || '',                                 // 26: Custom Timesteps
-    params.audioFormat || 'mp3',                                  // 27: Audio Format
-    params.lmTemperature ?? 0.85,                                 // 28: LM Temperature
-    isThinking,                                                   // 29: Think
-    params.lmCfgScale ?? 2.0,                                    // 30: LM CFG Scale
-    params.lmTopK ?? 0,                                           // 31: LM Top-K
-    params.lmTopP ?? 0.9,                                         // 32: LM Top-P
-    params.lmNegativePrompt || 'NO USER INPUT',                   // 33: LM Negative Prompt
-    useCot ? (params.useCotMetas ?? true) : false,                // 34: CoT Metas
-    useCot ? (params.useCotCaption ?? true) : false,              // 35: CaptionRewrite
-    useCot ? (params.useCotLanguage ?? true) : false,             // 36: CoT Language
-    params.isFormatCaption ?? false,                              // 37: Is Format Caption State
-    params.constrainedDecodingDebug ?? false,                     // 38: Constrained Decoding Debug
-    params.allowLmBatch ?? true,                                  // 39: ParallelThinking
-    params.getScores ?? false,                                    // 40: Auto Score
-    params.getLrc ?? false,                                       // 41: Auto LRC (timestamped lyrics)
-    params.scoreScale ?? 0.5,                                     // 42: Quality Score Sensitivity (0.01-1.0)
-    params.lmBatchChunkSize ?? 8,                                 // 43: LM Batch Chunk Size
-    params.trackName || null,                                     // 44: Track Name
-    params.completeTrackClasses || [],                            // 45: Track Names
-    true,                                                         // 46: Enable Normalization (ACE-Step v1.5, default true)
-    -1.0,                                                         // 47: Normalization DB (ACE-Step v1.5, default -1.0)
-    0.0,                                                          // 48: Latent Shift (ACE-Step v1.5, default 0.0)
-    1.0,                                                          // 49: Latent Rescale (ACE-Step v1.5, default 1.0)
-    params.autogen ?? false,                                      // 50: AutoGen
-    // Note: current_batch_index, total_batches, batch_queue, generation_params_state
-    // are hidden Gradio state variables and must NOT be passed via client.predict()
+    'euler',                                                      // 26: Sampler Mode (euler|heun)
+    0.0,                                                          // 27: Velocity Norm Threshold
+    0.0,                                                          // 28: Velocity EMA Factor
+    false,                                                        // 29: Enable DCW (known-good runs have it off; stock UI disables it with Think)
+    'double',                                                     // 30: DCW Mode
+    0.02,                                                         // 31: DCW Scaler
+    0.06,                                                         // 32: DCW High Scaler
+    'haar',                                                       // 33: DCW Wavelet
+    params.customTimesteps || '',                                 // 34: Custom Timesteps
+    params.audioFormat || 'wav',                                  // 35: Audio Format
+    '320k',                                                       // 36: MP3 Bitrate (if mp3 chosen)
+    48000,                                                        // 37: MP3 Sample Rate
+    params.lmTemperature ?? 0.85,                                 // 38: LM Temperature
+    isThinking,                                                   // 39: Think
+    params.lmCfgScale ?? 2.0,                                     // 40: LM CFG Scale
+    params.lmTopK ?? 0,                                           // 41: LM Top-K
+    params.lmTopP ?? 0.9,                                         // 42: LM Top-P
+    params.lmNegativePrompt || 'NO USER INPUT',                   // 43: LM Negative Prompt
+    useCot ? (params.useCotMetas ?? true) : false,                // 44: CoT Metas
+    useCot ? (params.useCotCaption ?? true) : false,              // 45: CaptionRewrite
+    useCot ? (params.useCotLanguage ?? false) : false,            // 46: CoT Language Detection (off: respect pinned language)
+    params.constrainedDecodingDebug ?? false,                     // 47: Constrained Decoding Debug
+    params.allowLmBatch ?? true,                                  // 48: ParallelThinking
+    params.getScores ?? false,                                    // 49: Auto Score
+    params.getLrc ?? false,                                       // 50: Auto LRC
+    params.scoreScale ?? 0.5,                                     // 51: Quality Score Sensitivity
+    params.lmBatchChunkSize ?? 8,                                 // 52: LM Batch Chunk Size
+    params.trackName || null,                                     // 53: Track Name
+    params.completeTrackClasses || [],                            // 54: Track Names
+    true,                                                         // 55: Enable Normalization
+    -1.0,                                                         // 56: Target Peak (dB)
+    0.0,                                                          // 57: Fade In (s)
+    0.0,                                                          // 58: Fade Out (s)
+    0.0,                                                          // 59: Latent Shift
+    1.0,                                                          // 60: Latent Rescale
+    'balanced',                                                   // 61: Repaint Mode
+    0.5,                                                          // 62: Repaint Strength
+    0.0,                                                          // 63: variance
+    '',                                                           // 64: retake seed
+    false,                                                        // 65: Edit (flow edit)
+    null,                                                         // 66: source caption (flow edit)
+    null,                                                         // 67: source lyrics (flow edit)
+    0.0,                                                          // 68: n_min
+    1.0,                                                          // 69: n_max
+    1,                                                            // 70: n_avg
+    params.autogen ?? false,                                      // 71: AutoGen
+    // Note: hidden Gradio state (batch index/queue etc.) must NOT be passed.
   ];
 }
 
